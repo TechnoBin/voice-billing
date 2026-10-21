@@ -25,7 +25,102 @@ export default function BillingApp(){
  function findProduct(name:string){const n=normalizeText(name);return products.find(p=>normalizeText(p.name)===n||p.aliases.some(a=>normalizeText(a)===n));}
  function addToCart(product:Product,quantity=1){setCart(prev=>{const found=prev.find(i=>i.product.id===product.id);return found?prev.map(i=>i.product.id===product.id?{...i,quantity:Math.min(999,i.quantity+quantity)}:i):[...prev,{product,quantity}];});}
  function handleUtterance(raw:string){const {name,quantity}=parseQuantity(raw);if(!name)return;const product=findProduct(name);if(product){addToCart(product,quantity);setMessage(`Added ${quantity} × ${product.name} to this bill.`);}else{setMessage(`Could not find “${name}”. Add it to your product catalogue or say its exact name.`);}}
- function startVoice(){const Ctor=window.SpeechRecognition||window.webkitSpeechRecognition;if(!Ctor){setMessage("Voice input is not supported by this browser. Try Chrome on Android, or use the product search below.");return;}if(listening){recognition.current?.stop();setListening(false);return;}const rec=new Ctor();rec.lang="hi-IN";rec.continuous=true;rec.interimResults=true;rec.onresult=(event:any)=>{let finalText="", interim="";for(let i=event.resultIndex;i<event.results.length;i++){const phrase=event.results[i][0].transcript;if(event.results[i].isFinal)finalText+=phrase;else interim+=phrase;}setVoiceText(finalText||interim);if(finalText){finalText.split(/[।,;\n]+/).map((x:string)=>x.trim()).filter(Boolean).forEach(handleUtterance);setVoiceText(finalText);}};rec.onerror=(e:any)=>{setMessage(`Voice input issue: ${e.error||"please try again"}. You can still add products manually.`);setListening(false);};rec.onend=()=>setListening(false);recognition.current=rec;try{rec.start();setListening(true);setMessage("Listening… say a product name followed by quantity, for example “Oreo 5”.");}catch{setMessage("Could not start the microphone. Check browser permission and try again.");}}
+ // Helper 1: Converts spoken English & Hinglish number words into digits ("five" -> "5", "do" -> "2")
+function normalizeNumbers(text: string): string {
+  const numberWords: Record<string, string> = {
+    // English numbers
+    'one': '1', 'two': '2', 'three': '3', 'four': '4', 'five': '5',
+    'six': '6', 'seven': '7', 'eight': '8', 'nine': '9', 'ten': '10',
+    'half': '0.5',
+
+    // Hinglish numbers
+    'ek': '1', 'do': '2', 'teen': '3', 'chaar': '4', 'char': '4',
+    'paanch': '5', 'panch': '5', 'chhah': '6', 'che': '6', 'saat': '7',
+    'aath': '8', 'nau': '9', 'das': '10', 'aadha': '0.5'
+  };
+
+  return text
+    .toLowerCase()
+    .split(/\s+/)
+    .map(word => numberWords[word] || word)
+    .join(' ');
+}
+
+// Helper 2: Converts any stray Devanagari script characters into Roman letters
+function toRoman(str: string): string {
+  const devanagariMap: Record<string, string> = {
+    'अ':'a','आ':'aa','इ':'i','ई':'ee','उ':'u','ऊ':'oo','ए':'e','ऐ':'ai','ओ':'o','औ':'au',
+    'ा':'a','ि':'i','ी':'i','ु':'u','ू':'u','े':'e','ै':'ai','ो':'o','ौ':'au','ं':'n','्':'',
+    'क':'k','ख':'kh','ग':'g','घ':'gh','च':'ch','छ':'chh','ज':'j','झ':'jh',
+    'ट':'t','ठ':'th','ड':'d','ढ':'dh','ण':'n','त':'t','थ':'th','द':'d','ध':'dh','न':'n',
+    'प':'p','फ':'f','ब':'b','भ':'bh','म':'m','य':'y','र':'r','ल':'l','व':'v',
+    'श':'sh','ष':'sh','स':'s','ह':'h','०':'0','१':'1','२':'2','३':'3','४':'4','५':'5','६':'6','७':'7','८':'8','९':'9'
+  };
+  return str.split('').map(c => devanagariMap[c] || c).join('');
+}
+
+ function startVoice() {
+  const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Ctor) {
+    setMessage("Voice input is not supported by this browser. Try Chrome on Android, or use the product search below.");
+    return;
+  }
+  if (listening) {
+    recognition.current?.stop();
+    setListening(false);
+    return;
+  }
+
+  const rec = new Ctor();
+
+  // 1. Language set to "en-IN" for English + Hinglish spoken input
+  rec.lang = "en-IN";
+  rec.continuous = true;
+  rec.interimResults = true;
+
+  rec.onresult = (event: any) => {
+    let finalText = "", interim = "";
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const phrase = event.results[i][0].transcript;
+      if (event.results[i].isFinal) finalText += phrase;
+      else interim += phrase;
+    }
+
+    // 2. Convert Devanagari characters to Roman characters
+    const processedFinal = toRoman(finalText);
+    const processedInterim = toRoman(interim);
+
+    setVoiceText(processedFinal || processedInterim);
+
+    if (processedFinal) {
+      processedFinal
+        .split(/[।,;\n]+/)
+        .map((x: string) => x.trim())
+        .filter(Boolean)
+        .map(normalizeNumbers) // 3. Converts "oreo five" -> "oreo 5" & "aloo do" -> "aloo 2"
+        .forEach(handleUtterance);
+
+      setVoiceText(processedFinal);
+    }
+  };
+
+  rec.onerror = (e: any) => {
+    setMessage(`Voice input issue: ${e.error || "please try again"}. You can still add products manually.`);
+    setListening(false);
+  };
+
+  rec.onend = () => setListening(false);
+
+  recognition.current = rec;
+
+  try {
+    rec.start();
+    setListening(true);
+    setMessage("Listening… say a product name followed by quantity, for example “Oreo five” or “Aloo do kg”.");
+  } catch {
+    setMessage("Could not start the microphone. Check browser permission and try again.");
+  }
+}
  async function saveBill(){if(!cart.length){setMessage("Add at least one product before saving the bill.");return;}setBusy(true);const bill:Bill={id:makeId(),createdAt:new Date().toISOString(),items:cart.map(i=>({name:i.product.name,price:i.product.price,quantity:i.quantity})),total,status:"saved"};const sb=getSupabase();if(sb){const {data:billRow,error}=await sb.from("bills").insert({customer_name:customer.trim()||null,subtotal,discount:discountValue,total,status:"saved"}).select("id,created_at").single();if(error||!billRow){setMessage(`Cloud save failed: ${error?.message||"unknown error"}. Bill was not cleared; retry after checking connection.`);setBusy(false);return;}const rows=cart.map(i=>({bill_id:billRow.id,product_id:i.product.id,name_snapshot:i.product.name,unit_price:i.product.price,quantity:i.quantity,line_total:i.product.price*i.quantity}));const {error:itemError}=await sb.from("bill_items").insert(rows);if(itemError){setMessage(`Bill created but item save failed. Do not finalize another copy; ask your developer to repair bill ${billRow.id}.`);setBusy(false);return;}bill.id=billRow.id;bill.createdAt=billRow.created_at;}setHistory(prev=>[bill,...prev]);setCart([]);setDiscount("0");setMessage(cloud?"Bill saved to the cloud.":"Bill saved on this device only. Configure Supabase to sync across devices.");setBusy(false);}
  async function addProduct(){const name=productName.trim(),price=Number(productPrice);if(!name||productPrice.trim()===""||!Number.isFinite(price)||price<0){setMessage("Enter a product name and a valid price (zero or more). ");return;}const existing=findProduct(name);if(existing){const sb=getSupabase();if(sb){const {error}=await sb.from("products").update({price}).eq("id",existing.id);if(error){setMessage(`Cloud update failed: ${error.message}`);return;}}setProducts(prev=>prev.map(p=>p.id===existing.id?{...p,price}:p));setMessage(`${name} price updated.`);}else{const p:Product={id:makeId(),name,price,aliases:[]};const sb=getSupabase();if(sb){const {data,error}=await sb.from("products").insert({name,price,aliases:[]}).select("id,name,price,aliases,category").single();if(error){setMessage(`Cloud save failed: ${error.message}`);return;}if(data)p.id=data.id;}setProducts(prev=>[...prev,p]);setMessage(`${name} added to catalogue.`);}setProductName("");setProductPrice("");setShowAdd(false);}
  async function importFile(file?:File){if(!file)return;setImporting(true);try{const parsed=parseCSV(await file.text());if(!parsed.length){setMessage("No valid rows found. Use CSV columns: name,price,aliases.");return;}let added=0,updated=0;for(const row of parsed){const old=products.find(p=>normalizeText(p.name)===normalizeText(row.name));if(old){setProducts(prev=>prev.map(p=>p.id===old.id?{...p,price:row.price,aliases:row.aliases.length?row.aliases:p.aliases}:p));updated++;}else{const p:Product={id:makeId(),name:row.name,price:row.price,aliases:row.aliases};const sb=getSupabase();if(sb){const {data,error}=await sb.from("products").upsert({name:p.name,price:p.price,aliases:p.aliases},{onConflict:"name"}).select("id,name,price,aliases,category").single();if(error){setMessage(`Import stopped at ${row.name}: ${error.message}.`);return;}if(data)p.id=data.id;}setProducts(prev=>[...prev,p]);added++;}}setMessage(`Import complete: ${added} added, ${updated} updated.`);}catch{setMessage("Could not read that file. Export your spreadsheet as CSV UTF-8 and retry.");}finally{setImporting(false);if(fileRef.current)fileRef.current.value="";}}
