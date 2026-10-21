@@ -1,0 +1,2 @@
+export function normalizeText(value: string) { return value.toLowerCase().replace(/[.,!?]/g, " ").replace(/\s+/g, " ").trim(); }
+export function parseQuantity(text: string) { const match = text.match(/(?:\s|^)(\d+)\s*$/); if (!match) return { name: normalizeText(text), quantity: 1 }; return { name: normalizeText(text.slice(0, match.index)), quantity: Math.max(1, Math.min(999, Number(match[1]))) }; }

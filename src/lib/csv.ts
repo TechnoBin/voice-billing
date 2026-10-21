@@ -1,0 +1,6 @@
+export function parseCSV(text: string): { name: string; price: number; aliases: string[] }[] {
+ const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).filter(line => line.trim()); if (!lines.length) return [];
+ const split = (line: string) => { const out: string[]=[]; let cur="", quoted=false; for(let i=0;i<line.length;i++){const c=line[i]; if(c==='"' && line[i+1]==='"' && quoted){cur+='"';i++;}else if(c==='"'){quoted=!quoted;}else if(c===','&&!quoted){out.push(cur.trim());cur="";}else cur+=c;}out.push(cur.trim());return out;};
+ const first=split(lines[0]).map(x=>x.toLowerCase()); const hasHeader=first.some(x=>["name","product","product name","price","unit price","aliases"].includes(x)); const rows=hasHeader?lines.slice(1):lines; const headers=hasHeader?first: ["name","price","aliases"];
+ return rows.map(line=>{const cells=split(line);const get=(keys:string[],fallback:number)=>{const ix=headers.findIndex(h=>keys.includes(h));return cells[ix>=0?ix:fallback]??""};const name=get(["name","product","product name"],0);const price=Number(get(["price","unit price","rate"],1).replace(/[₹, ]/g,""));const aliases=get(["aliases","alias"],2).split(/[|;]/).map(x=>x.trim()).filter(Boolean);return {name,price,aliases};}).filter(p=>p.name && Number.isFinite(p.price) && p.price>=0);
+}
