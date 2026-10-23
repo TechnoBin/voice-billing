@@ -98,6 +98,7 @@ export default function BillingApp() {
   const [query, setQuery] = useState("");
   const [voiceText, setVoiceText] = useState("");
   const [listening, setListening] = useState(false);
+  const listeningRef = useRef(false);
   const [message, setMessage] = useState("Demo mode is ready. Add Supabase settings to sync across devices.");
   const [cloud, setCloud] = useState(false);
   const [customer, setCustomer] = useState("");
@@ -121,36 +122,47 @@ export default function BillingApp() {
 
   // Safe Text-to-Speech that pauses recognition on Android to prevent mic conflicts
   function speakAssistant(text: string, onComplete?: () => void) {
-    if (typeof window !== "undefined" && "speechSynthesis" in window) {
-      try {
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.lang = "en-IN";
-        utterance.rate = 1.0;
+  if (typeof window !== "undefined" && "speechSynthesis" in window) {
+    try {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = "en-IN";
+      utterance.rate = 1.0;
 
-        utterance.onstart = () => {
-          isSpeakingAssistant.current = true;
-          // Temporarily stop recognition so Android mic isn't held during TTS
-          if (recognition.current) {
-            try { recognition.current.stop(); } catch {}
-          }
-        };
+      utterance.onstart = () => {
+        isSpeakingAssistant.current = true;
+        if (recognition.current) {
+          try { recognition.current.stop(); } catch {}
+        }
+      };
 
-        utterance.onend = () => {
-          isSpeakingAssistant.current = false;
-          if (onComplete) onComplete();
-        };
-
-        utterance.onerror = () => {
-          isSpeakingAssistant.current = false;
-        };
-
-        window.speechSynthesis.speak(utterance);
-      } catch {
+      utterance.onend = () => {
         isSpeakingAssistant.current = false;
-      }
+        if (onComplete) onComplete();
+        // Automatically resume listening after TTS prompt finishes
+        if (listeningRef.current && recognition.current) {
+          try {
+            recognition.current.start();
+          } catch {}
+        }
+      };
+
+      utterance.onerror = () => {
+        isSpeakingAssistant.current = false;
+        if (listeningRef.current && recognition.current) {
+          try {
+            recognition.current.start();
+          } catch {}
+        }
+      };
+
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      isSpeakingAssistant.current = false;
     }
   }
+}
+
 
   useEffect(() => {
     try {
@@ -402,76 +414,94 @@ export default function BillingApp() {
   }
 
   function startVoice() {
-    const Ctor = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
-    if (!Ctor) {
-      setMessage("Voice input is not supported by this browser. Try Chrome on Android.");
-      return;
+  const Ctor = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
+  if (!Ctor) {
+    setMessage("Voice input is not supported by this browser. Try Chrome on Android.");
+    return;
+  }
+
+  // Toggle OFF if already active
+  if (listeningRef.current) {
+    listeningRef.current = false;
+    setListening(false);
+    if (recognition.current) {
+      try { recognition.current.stop(); } catch {}
+    }
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+    playSoundCue("action");
+    setMessage("Microphone stopped.");
+    return;
+  }
+
+  // Toggle ON
+  listeningRef.current = true;
+  setListening(true);
+
+  const rec = new Ctor();
+  rec.lang = "en-IN";
+  rec.continuous = true;
+  rec.interimResults = true;
+
+  rec.onresult = (event: any) => {
+    if (isSpeakingAssistant.current) return;
+
+    let finalText = "", interim = "";
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const phrase = event.results[i][0].transcript;
+      if (event.results[i].isFinal) finalText += phrase;
+      else interim += phrase;
     }
 
-    if (listening) {
-      if (recognition.current) recognition.current.stop();
-      setListening(false);
-      playSoundCue("action");
-      speakAssistant("Microphone stopped.");
-      return;
+    const processedFinal = toRoman(finalText);
+    const processedInterim = toRoman(interim);
+    const currentSpeech = processedFinal || processedInterim;
+
+    setVoiceText(currentSpeech);
+
+    if (processedFinal) {
+      const cleanedText = cleanSpokenInput(processedFinal);
+      processVoiceStream(cleanedText);
     }
+  };
 
-    const rec = new Ctor();
-    rec.lang = "en-IN";
-    rec.continuous = true;
-    rec.interimResults = true;
+  rec.onerror = (e: any) => {
+    setMessage(`Voice input issue: ${e.error || "please try again"}.`);
+    listeningRef.current = false;
+    setListening(false);
+  };
 
-    rec.onresult = (event: any) => {
-      if (isSpeakingAssistant.current) return;
+  rec.onend = () => {
+    // If assistant is currently speaking, wait for utterance.onend to restart
+    if (isSpeakingAssistant.current) return;
 
-      let finalText = "", interim = "";
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const phrase = event.results[i][0].transcript;
-        if (event.results[i].isFinal) finalText += phrase;
-        else interim += phrase;
-      }
-
-      const processedFinal = toRoman(finalText);
-      const processedInterim = toRoman(interim);
-      const currentSpeech = processedFinal || processedInterim;
-
-      setVoiceText(currentSpeech);
-
-      if (processedFinal) {
-        const cleanedText = cleanSpokenInput(processedFinal);
-        processVoiceStream(cleanedText);
-      }
-    };
-
-    rec.onerror = (e: any) => {
-      setMessage(`Voice input issue: ${e.error || "please try again"}.`);
-      setListening(false);
-    };
-
-    rec.onend = () => {
-      if (listening && !isSpeakingAssistant.current) {
-        try {
-          rec.start();
-        } catch {
-          setListening(false);
-        }
-      } else {
+    if (listeningRef.current) {
+      try {
+        rec.start();
+      } catch {
+        listeningRef.current = false;
         setListening(false);
       }
-    };
-
-    recognition.current = rec;
-
-    try {
-      rec.start();
-      setListening(true);
-      playSoundCue("action");
-      speakAssistant("Voice assistant active.");
-      setMessage("Listening continuously... Say 'Dairy Milk 5', 'Undo', or 'Finalize bill'.");
-    } catch {
-      setMessage("Could not start microphone. Check browser permissions.");
+    } else {
+      setListening(false);
     }
+  };
+
+  recognition.current = rec;
+
+  try {
+    rec.start();
+    playSoundCue("action");
+    speakAssistant("Voice assistant active.");
+    setMessage("Listening continuously... Say 'Dairy Milk 5', 'Undo', or 'Finalize bill'.");
+  } catch {
+    listeningRef.current = false;
+    setListening(false);
+    setMessage("Could not start microphone. Check browser permissions.");
   }
+}
+
 
   async function saveBill() {
     if (!cart.length) {
