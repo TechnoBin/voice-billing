@@ -175,16 +175,49 @@ export default function BillingApp() {
   }
 
   function toRoman(str: string): string {
-    const devanagariMap: Record<string, string> = {
-      अ: "a", आ: "aa", इ: "i", ई: "ee", उ: "u", ऊ: "oo", ए: "e", ऐ: "ai", ओ: "o", औ: "au",
-      ा: "a", ि: "i", ी: "i", ु: "u", ू: "u", े: "e", ै: "ai", ो: "o", ौ: "au", ं: "n", ्: "",
-      क: "k", ख: "kh", ग: "g", घ: "gh", च: "ch", छ: "chh", ज: "j", झ: "jh",
-      ट: "t", ठ: "th", ड: "d", ढ: "dh", ण: "n", त: "t", थ: "th", द: "d", ध: "dh", न: "n",
-      प: "p", फ: "f", ब: "b", भ: "bh", म: "m", य: "y", र: "r", ल: "l", व: "v",
-      श: "sh", ष: "sh", स: "s", ह: "h", ०: "0", १: "1", २: "2", ३: "3", ४: "4", ५: "5", ६: "6", ७: "7", ८: "8", ९: "9"
-    };
-    return str.split("").map(c => devanagariMap[c] || c).join("");
-  }
+  const devanagariMap: Record<string, string> = {
+    // Independent Vowels
+    "अ": "a", "आ": "aa", "इ": "i", "ई": "ee", "उ": "u", "ऊ": "oo",
+    "ए": "e", "ऐ": "ai", "ओ": "o", "औ": "au", "ऋ": "ri",
+
+    // Vowel Signs / Matras (Escaped Unicode keys bypass SWC lexer errors)
+    "\u093E": "a",  // Aa matra  (ा)
+    "\u093F": "i",  // Short I   (ि)
+    "\u0940": "i",  // Long I    (ी)
+    "\u0941": "u",  // Short U   (ु)
+    "\u0942": "u",  // Long U    (ू)
+    "\u0947": "e",  // E matra   (े)
+    "\u0948": "ai", // Ai matra  (ै)
+    "\u094B": "o",  // O matra   (ो)
+    "\u094C": "au", // Au matra  (ौ)
+
+    // Modifiers & Diacritics
+    "\u0901": "n",  // Chandrabindu (ँ)
+    "\u0902": "n",  // Anusvara     (ं)
+    "\u0903": "h",  // Visarga      (ः)
+    "\u094D": "",   // Halant       (्)
+    "\u093C": "",   // Nukta        (़)
+
+    // Consonants
+    "क": "k", "ख": "kh", "ग": "g", "घ": "gh", "ङ": "ng",
+    "च": "ch", "छ": "chh", "ज": "j", "झ": "jh", "ञ": "nya",
+    "ट": "t", "ठ": "th", "ड": "d", "ढ": "dh", "ण": "n",
+    "त": "t", "थ": "th", "द": "d", "ध": "dh", "न": "n",
+    "प": "p", "फ": "f", "ब": "b", "भ": "bh", "म": "m",
+    "य": "y", "र": "r", "ल": "l", "व": "v",
+    "श": "sh", "ष": "sh", "स": "s", "ह": "h",
+
+    // Digits
+    "०": "0", "१": "1", "२": "2", "३": "3", "४": "4",
+    "५": "5", "६": "6", "७": "7", "८": "8", "९": "9"
+  };
+
+  return str
+    .split("")
+    .map(c => devanagariMap[c] || c)
+    .join("");
+}
+
 
   // Pure function for stream parsing to avoid React hook dependency issues
   function processVoiceStream(rawTranscript: string) {
