@@ -40,7 +40,7 @@ const makeId = () =>
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-// Web Audio API Synthesizer (No external audio files needed)
+// Web Audio API Chimes (Pure output tones — does not grab the hardware mic)
 function playSoundCue(type: "success" | "error" | "action") {
   if (typeof window === "undefined") return;
   try {
@@ -49,40 +49,37 @@ function playSoundCue(type: "success" | "error" | "action") {
     const ctx = new AudioCtx();
 
     if (type === "success") {
-      // Pleasant double-tone cash register chime
       const osc1 = ctx.createOscillator();
       const osc2 = ctx.createOscillator();
       const gain = ctx.createGain();
-      osc1.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
-      osc2.frequency.setValueAtTime(880, ctx.currentTime + 0.08); // A5
-      gain.gain.setValueAtTime(0.15, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+      osc1.frequency.setValueAtTime(587.33, ctx.currentTime);
+      osc2.frequency.setValueAtTime(880, ctx.currentTime + 0.08);
+      gain.gain.setValueAtTime(0.12, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
       osc1.connect(gain);
       osc2.connect(gain);
       gain.connect(ctx.destination);
       osc1.start();
       osc2.start(ctx.currentTime + 0.08);
-      osc1.stop(ctx.currentTime + 0.3);
-      osc2.stop(ctx.currentTime + 0.3);
+      osc1.stop(ctx.currentTime + 0.25);
+      osc2.stop(ctx.currentTime + 0.25);
     } else if (type === "error") {
-      // Low subtle warning bump
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = "sawtooth";
       osc.frequency.setValueAtTime(180, ctx.currentTime);
       osc.frequency.exponentialRampToValueAtTime(110, ctx.currentTime + 0.2);
-      gain.gain.setValueAtTime(0.1, ctx.currentTime);
+      gain.gain.setValueAtTime(0.08, ctx.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.2);
       osc.connect(gain);
       gain.connect(ctx.destination);
       osc.start();
       osc.stop(ctx.currentTime + 0.2);
     } else if (type === "action") {
-      // Crisp click sound
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.frequency.setValueAtTime(440, ctx.currentTime);
-      gain.gain.setValueAtTime(0.1, ctx.currentTime);
+      gain.gain.setValueAtTime(0.08, ctx.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.1);
       osc.connect(gain);
       gain.connect(ctx.destination);
@@ -90,7 +87,7 @@ function playSoundCue(type: "success" | "error" | "action") {
       osc.stop(ctx.currentTime + 0.1);
     }
   } catch {
-    // Ignore audio context errors if browser muted
+    // Ignore audio context lock
   }
 }
 
@@ -101,7 +98,6 @@ export default function BillingApp() {
   const [query, setQuery] = useState("");
   const [voiceText, setVoiceText] = useState("");
   const [listening, setListening] = useState(false);
-  const [audioLevel, setAudioLevel] = useState(0);
   const [message, setMessage] = useState("Demo mode is ready. Add Supabase settings to sync across devices.");
   const [cloud, setCloud] = useState(false);
   const [customer, setCustomer] = useState("");
@@ -117,31 +113,38 @@ export default function BillingApp() {
   const fileRef = useRef<HTMLInputElement>(null);
   const lastProcessedTranscript = useRef<string>("");
   const isSpeakingAssistant = useRef<boolean>(false);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const micStreamRef = useRef<MediaStream | null>(null);
-  const animFrameRef = useRef<number | null>(null);
-
-  // Memory to track items added recently so we can override quantities ("Oreo 5" bug fix)
   const lastAddedItem = useRef<{ id: string; name: string; timestamp: number; wasDefaultQty: boolean } | null>(null);
 
   const subtotal = useMemo(() => cart.reduce((s, i) => s + i.product.price * i.quantity, 0), [cart]);
   const discountValue = Math.min(subtotal, Math.max(0, Number(discount) || 0));
   const total = Math.max(0, subtotal - discountValue);
 
-  // Safe Text-to-Speech with Loop Prevention
-  function speakAssistant(text: string) {
+  // Safe Text-to-Speech that pauses recognition on Android to prevent mic conflicts
+  function speakAssistant(text: string, onComplete?: () => void) {
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       try {
-        isSpeakingAssistant.current = true;
         window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(text);
         utterance.lang = "en-IN";
         utterance.rate = 1.0;
-        utterance.onend = () => {
-          setTimeout(() => {
-            isSpeakingAssistant.current = false;
-          }, 400); // Mute mic buffer
+
+        utterance.onstart = () => {
+          isSpeakingAssistant.current = true;
+          // Temporarily stop recognition so Android mic isn't held during TTS
+          if (recognition.current) {
+            try { recognition.current.stop(); } catch {}
+          }
         };
+
+        utterance.onend = () => {
+          isSpeakingAssistant.current = false;
+          if (onComplete) onComplete();
+        };
+
+        utterance.onerror = () => {
+          isSpeakingAssistant.current = false;
+        };
+
         window.speechSynthesis.speak(utterance);
       } catch {
         isSpeakingAssistant.current = false;
@@ -217,31 +220,26 @@ export default function BillingApp() {
     return products.find(p => normalizeText(p.name) === n || p.aliases.some(a => normalizeText(a) === n));
   }
 
-  // Smart Cart Management (Fixes "Oreo 5" becoming 6)
+  // Fixes "Oreo 5" becoming 6 by overriding quantity if item was added seconds ago
   function smartAddToCart(product: Product, quantity = 1, explicitQuantityProvided = false) {
     const now = Date.now();
     const isRecentItem =
       lastAddedItem.current &&
       lastAddedItem.current.id === product.id &&
-      now - lastAddedItem.current.timestamp < 4000; // Within 4 seconds
+      now - lastAddedItem.current.timestamp < 4000;
 
     setCart(prev => {
       const existingIdx = prev.findIndex(i => i.product.id === product.id);
 
       if (existingIdx > -1) {
-        // BUG FIX: If item was added with default qty 1 seconds ago and user now says a quantity (e.g., 5),
-        // OVERWRITE quantity to 5 instead of adding +5 (1 + 5 = 6)!
         if (isRecentItem && lastAddedItem.current?.wasDefaultQty && explicitQuantityProvided) {
           return prev.map((item, idx) => (idx === existingIdx ? { ...item, quantity } : item));
         }
-
-        // Standard add / increment
         return prev.map((item, idx) =>
           idx === existingIdx ? { ...item, quantity: explicitQuantityProvided ? quantity : item.quantity + quantity } : item
         );
       }
 
-      // First time adding item
       return [...prev, { product, quantity }];
     });
 
@@ -253,7 +251,6 @@ export default function BillingApp() {
     };
   }
 
-  // Strip Spoken Units & Normalizes Numbers
   function cleanSpokenInput(text: string): string {
     const numberWords: Record<string, string> = {
       one: "1", two: "2", three: "3", four: "4", five: "5",
@@ -264,8 +261,6 @@ export default function BillingApp() {
     };
 
     let cleaned = text.toLowerCase();
-
-    // Remove filler units so "oreo 5 packets" -> "oreo 5"
     cleaned = cleaned.replace(/\b(packets?|pkts?|pieces?|pcs?|kg|kilo|grams?|gm|liters?|ltr|boxes?)\b/gi, "").trim();
 
     return cleaned
@@ -298,14 +293,13 @@ export default function BillingApp() {
       .join("");
   }
 
-  // Conversational Multi-Item & Voice Command Engine
   function processVoiceStream(rawTranscript: string) {
     if (!rawTranscript || rawTranscript === lastProcessedTranscript.current || isSpeakingAssistant.current) return;
     lastProcessedTranscript.current = rawTranscript;
 
     const clean = rawTranscript.toLowerCase().trim();
 
-    // Voice Action 1: Finalize Bill
+    // Command: Finalize
     if (/finalize\s*bill|final\s*bill|finish\s*bill|complete\s*bill/i.test(clean)) {
       if (recognition.current) recognition.current.stop();
       setListening(false);
@@ -316,7 +310,7 @@ export default function BillingApp() {
       return;
     }
 
-    // Voice Action 2: Undo Last Item
+    // Command: Undo
     if (/undo|cancel\s*that|remove\s*last|take\s*back/i.test(clean)) {
       if (lastAddedItem.current) {
         const itemToRemove = lastAddedItem.current;
@@ -329,7 +323,7 @@ export default function BillingApp() {
       return;
     }
 
-    // Voice Action 3: Clear Bill
+    // Command: Clear
     if (/clear\s*bill|clear\s*all|reset\s*bill|empty\s*cart/i.test(clean)) {
       setCart([]);
       setDiscount("0");
@@ -339,7 +333,7 @@ export default function BillingApp() {
       return;
     }
 
-    // Voice Action 4: Change Quantity ("Change to 3" or "Make it 2")
+    // Command: Change Qty
     const changeQtyMatch = clean.match(/(?:change|make|set)(?:\s+it|\s+qty|\s+quantity)?\s+(?:to\s+)?(\d+)/i);
     if (changeQtyMatch && changeQtyMatch[1] && lastAddedItem.current) {
       const newQty = parseInt(changeQtyMatch[1], 10);
@@ -353,7 +347,7 @@ export default function BillingApp() {
       return;
     }
 
-    // Voice Action 5: Remove Specific Item ("Remove Kitkat")
+    // Command: Remove Product
     const removeMatch = clean.match(/(?:remove|delete|drop)\s+([a-z0-9\s]+)/i);
     if (removeMatch && removeMatch[1]) {
       const targetName = removeMatch[1].trim();
@@ -367,7 +361,7 @@ export default function BillingApp() {
       return;
     }
 
-    // Multi-Item Extraction Logic ("Dairy Milk 5 KitKat 6 Bourbon 2")
+    // Multi-Item Extraction
     let itemText = clean.replace(/ok\s*add\s*product|add\s*products?|add\s*items?/gi, "").trim();
     const pairRegex = /([a-z\s\-]+?)\s+(\d+(?:\.\d+)?)(?=\s+[a-z]|$)/gi;
     let match: RegExpExecArray | null;
@@ -392,7 +386,6 @@ export default function BillingApp() {
       setMessage(feedbackMsg);
       speakAssistant(feedbackMsg);
     } else {
-      // Single Item Fallback ("Oreo")
       const { name, quantity } = parseQuantity(clean);
       if (name) {
         const product = findProduct(name);
@@ -408,48 +401,6 @@ export default function BillingApp() {
     }
   }
 
-  // Live Sound Visualizer Setup
-  async function startAudioVisualizer() {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      micStreamRef.current = stream;
-
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      const audioCtx = new AudioCtx();
-      audioContextRef.current = audioCtx;
-
-      const source = audioCtx.createMediaStreamSource(stream);
-      const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 64;
-      source.connect(analyser);
-
-      const bufferLength = analyser.frequencyBinCount;
-      const dataArray = new Uint8Array(bufferLength);
-
-      const updateLevel = () => {
-        analyser.getByteFrequencyData(dataArray);
-        let sum = 0;
-        for (let i = 0; i < bufferLength; i++) {
-          sum += dataArray[i];
-        }
-        const average = sum / bufferLength;
-        setAudioLevel(Math.min(100, Math.round((average / 128) * 100)));
-        animFrameRef.current = requestAnimationFrame(updateLevel);
-      };
-
-      updateLevel();
-    } catch {
-      // Ignore if user denies mic permission for canvas
-    }
-  }
-
-  function stopAudioVisualizer() {
-    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
-    if (micStreamRef.current) micStreamRef.current.getTracks().forEach(track => track.stop());
-    if (audioContextRef.current) audioContextRef.current.close();
-    setAudioLevel(0);
-  }
-
   function startVoice() {
     const Ctor = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
     if (!Ctor) {
@@ -459,7 +410,6 @@ export default function BillingApp() {
 
     if (listening) {
       if (recognition.current) recognition.current.stop();
-      stopAudioVisualizer();
       setListening(false);
       playSoundCue("action");
       speakAssistant("Microphone stopped.");
@@ -472,7 +422,7 @@ export default function BillingApp() {
     rec.interimResults = true;
 
     rec.onresult = (event: any) => {
-      if (isSpeakingAssistant.current) return; // Mute recognition while assistant speaks
+      if (isSpeakingAssistant.current) return;
 
       let finalText = "", interim = "";
       for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -496,21 +446,17 @@ export default function BillingApp() {
     rec.onerror = (e: any) => {
       setMessage(`Voice input issue: ${e.error || "please try again"}.`);
       setListening(false);
-      stopAudioVisualizer();
     };
 
     rec.onend = () => {
-      // Auto-Keep-Alive Restart
       if (listening && !isSpeakingAssistant.current) {
         try {
           rec.start();
         } catch {
           setListening(false);
-          stopAudioVisualizer();
         }
       } else {
         setListening(false);
-        stopAudioVisualizer();
       }
     };
 
@@ -518,7 +464,6 @@ export default function BillingApp() {
 
     try {
       rec.start();
-      startAudioVisualizer();
       setListening(true);
       playSoundCue("action");
       speakAssistant("Voice assistant active.");
@@ -679,6 +624,22 @@ export default function BillingApp() {
 
   return (
     <main className="app-shell">
+      <style>{`
+        @keyframes pulseBar {
+          0%, 100% { height: 4px; }
+          50% { height: 14px; }
+        }
+        .mic-bar {
+          width: 3px;
+          background: #e11d48;
+          border-radius: 2px;
+          animation: pulseBar 0.8s infinite ease-in-out;
+        }
+        .mic-bar:nth-child(2) { animation-delay: 0.15s; }
+        .mic-bar:nth-child(3) { animation-delay: 0.3s; }
+        .mic-bar:nth-child(4) { animation-delay: 0.45s; }
+      `}</style>
+
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark">K</div>
@@ -715,26 +676,25 @@ export default function BillingApp() {
           </div>
 
           <div className="voice-box">
-            <div className="voice-row" style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <div className="voice-row" style={{ display: "flex", itemsCenter: "center", gap: "12px" }}>
               <button
                 aria-label={listening ? "Stop voice billing" : "Start voice billing"}
                 className={`mic ${listening ? "listening" : ""}`}
                 onClick={startVoice}
-                style={{ position: "relative" }}
               >
                 {listening ? "■" : "🎙"}
               </button>
 
               <div className="voice-copy" style={{ flex: 1 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                  <strong>{listening ? "Listening..." : "Tap to start voice assistant"}</strong>
-                  {/* Live Mic Sound Waveform Visualizer */}
+                  <strong>{listening ? "Listening continuously..." : "Tap to start voice assistant"}</strong>
+                  {/* Pure CSS Wave Animation (No hardware mic lock on Android) */}
                   {listening && (
                     <div style={{ display: "flex", alignItems: "flex-end", gap: "2px", height: "14px" }}>
-                      <span style={{ width: "3px", height: `${Math.max(20, audioLevel * 0.8)}%`, background: "#e11d48", borderRadius: "2px", transition: "height 0.1s" }} />
-                      <span style={{ width: "3px", height: `${Math.max(30, audioLevel * 1.2)}%`, background: "#e11d48", borderRadius: "2px", transition: "height 0.1s" }} />
-                      <span style={{ width: "3px", height: `${Math.max(15, audioLevel * 0.6)}%`, background: "#e11d48", borderRadius: "2px", transition: "height 0.1s" }} />
-                      <span style={{ width: "3px", height: `${Math.max(25, audioLevel * 1.0)}%`, background: "#e11d48", borderRadius: "2px", transition: "height 0.1s" }} />
+                      <span className="mic-bar" />
+                      <span className="mic-bar" />
+                      <span className="mic-bar" />
+                      <span className="mic-bar" />
                     </div>
                   )}
                 </div>
@@ -744,7 +704,7 @@ export default function BillingApp() {
 
             <div className="transcript">{voiceText || "Your recognized speech will appear here."}</div>
             <div className="small-note">
-              Hands-free continuous recognition with auto sound chimes & voice undo support.
+              Hands-free continuous recognition optimized for mobile Chrome.
             </div>
           </div>
 
