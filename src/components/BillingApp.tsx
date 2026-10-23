@@ -6,12 +6,12 @@ import { normalizeText, parseQuantity } from "@/lib/voice";
 import type { Bill, CartItem, Product } from "@/lib/types";
 
 const starter: Product[] = [
-  { id: "p1", name: "Dairy Milk", price: 10, aliases: ["dairy milk", "silk"], category: "Chocolate" },
-  { id: "p2", name: "KitKat", price: 10, aliases: ["kit kat"], category: "Chocolate" },
-  { id: "p3", name: "Bourbon", price: 10, aliases: ["bourbon biscuit"], category: "Biscuit" },
-  { id: "p4", name: "Oreo", price: 5, aliases: ["oreo biscuit"], category: "Biscuit" },
-  { id: "p5", name: "Parle-G", price: 5, aliases: ["parle g", "parle ji"], category: "Biscuit" },
-  { id: "p6", name: "Milk", price: 30, aliases: ["packet milk"], category: "Dairy" },
+  { id: "p1", name: "Dairy Milk", price: 10, aliases: ["dairy milk", "silk", "deyri", "dairymilk"], category: "Chocolate" },
+  { id: "p2", name: "KitKat", price: 10, aliases: ["kit kat", "kitkat"], category: "Chocolate" },
+  { id: "p3", name: "Bourbon", price: 10, aliases: ["bourbon biscuit", "burbon"], category: "Biscuit" },
+  { id: "p4", name: "Oreo", price: 5, aliases: ["oreo biscuit", "oriyo", "orio"], category: "Biscuit" },
+  { id: "p5", name: "Parle-G", price: 5, aliases: ["parle g", "parle ji", "parleg"], category: "Biscuit" },
+  { id: "p6", name: "Milk", price: 30, aliases: ["packet milk", "doodh", "dudh"], category: "Dairy" },
 ];
 
 type SpeechRecognitionLike = {
@@ -40,18 +40,57 @@ const makeId = () =>
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-// Safe Speech Synthesis for Browser Environments
-function speakAssistant(text: string) {
-  if (typeof window !== "undefined" && "speechSynthesis" in window) {
-    try {
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = "en-IN";
-      utterance.rate = 1.0;
-      window.speechSynthesis.speak(utterance);
-    } catch {
-      // Ignore if speech synthesis is disabled on client browser
+// Web Audio API Synthesizer (No external audio files needed)
+function playSoundCue(type: "success" | "error" | "action") {
+  if (typeof window === "undefined") return;
+  try {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+
+    if (type === "success") {
+      // Pleasant double-tone cash register chime
+      const osc1 = ctx.createOscillator();
+      const osc2 = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc1.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
+      osc2.frequency.setValueAtTime(880, ctx.currentTime + 0.08); // A5
+      gain.gain.setValueAtTime(0.15, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+      osc1.connect(gain);
+      osc2.connect(gain);
+      gain.connect(ctx.destination);
+      osc1.start();
+      osc2.start(ctx.currentTime + 0.08);
+      osc1.stop(ctx.currentTime + 0.3);
+      osc2.stop(ctx.currentTime + 0.3);
+    } else if (type === "error") {
+      // Low subtle warning bump
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sawtooth";
+      osc.frequency.setValueAtTime(180, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(110, ctx.currentTime + 0.2);
+      gain.gain.setValueAtTime(0.1, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.2);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.2);
+    } else if (type === "action") {
+      // Crisp click sound
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.frequency.setValueAtTime(440, ctx.currentTime);
+      gain.gain.setValueAtTime(0.1, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.1);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.1);
     }
+  } catch {
+    // Ignore audio context errors if browser muted
   }
 }
 
@@ -62,6 +101,7 @@ export default function BillingApp() {
   const [query, setQuery] = useState("");
   const [voiceText, setVoiceText] = useState("");
   const [listening, setListening] = useState(false);
+  const [audioLevel, setAudioLevel] = useState(0);
   const [message, setMessage] = useState("Demo mode is ready. Add Supabase settings to sync across devices.");
   const [cloud, setCloud] = useState(false);
   const [customer, setCustomer] = useState("");
@@ -76,10 +116,38 @@ export default function BillingApp() {
   const recognition = useRef<SpeechRecognitionLike | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const lastProcessedTranscript = useRef<string>("");
+  const isSpeakingAssistant = useRef<boolean>(false);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const animFrameRef = useRef<number | null>(null);
+
+  // Memory to track items added recently so we can override quantities ("Oreo 5" bug fix)
+  const lastAddedItem = useRef<{ id: string; name: string; timestamp: number; wasDefaultQty: boolean } | null>(null);
 
   const subtotal = useMemo(() => cart.reduce((s, i) => s + i.product.price * i.quantity, 0), [cart]);
   const discountValue = Math.min(subtotal, Math.max(0, Number(discount) || 0));
   const total = Math.max(0, subtotal - discountValue);
+
+  // Safe Text-to-Speech with Loop Prevention
+  function speakAssistant(text: string) {
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      try {
+        isSpeakingAssistant.current = true;
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = "en-IN";
+        utterance.rate = 1.0;
+        utterance.onend = () => {
+          setTimeout(() => {
+            isSpeakingAssistant.current = false;
+          }, 400); // Mute mic buffer
+        };
+        window.speechSynthesis.speak(utterance);
+      } catch {
+        isSpeakingAssistant.current = false;
+      }
+    }
+  }
 
   useEffect(() => {
     try {
@@ -149,16 +217,44 @@ export default function BillingApp() {
     return products.find(p => normalizeText(p.name) === n || p.aliases.some(a => normalizeText(a) === n));
   }
 
-  function addToCart(product: Product, quantity = 1) {
+  // Smart Cart Management (Fixes "Oreo 5" becoming 6)
+  function smartAddToCart(product: Product, quantity = 1, explicitQuantityProvided = false) {
+    const now = Date.now();
+    const isRecentItem =
+      lastAddedItem.current &&
+      lastAddedItem.current.id === product.id &&
+      now - lastAddedItem.current.timestamp < 4000; // Within 4 seconds
+
     setCart(prev => {
-      const found = prev.find(i => i.product.id === product.id);
-      return found
-        ? prev.map(i => (i.product.id === product.id ? { ...i, quantity: Math.min(999, i.quantity + quantity) } : i))
-        : [...prev, { product, quantity }];
+      const existingIdx = prev.findIndex(i => i.product.id === product.id);
+
+      if (existingIdx > -1) {
+        // BUG FIX: If item was added with default qty 1 seconds ago and user now says a quantity (e.g., 5),
+        // OVERWRITE quantity to 5 instead of adding +5 (1 + 5 = 6)!
+        if (isRecentItem && lastAddedItem.current?.wasDefaultQty && explicitQuantityProvided) {
+          return prev.map((item, idx) => (idx === existingIdx ? { ...item, quantity } : item));
+        }
+
+        // Standard add / increment
+        return prev.map((item, idx) =>
+          idx === existingIdx ? { ...item, quantity: explicitQuantityProvided ? quantity : item.quantity + quantity } : item
+        );
+      }
+
+      // First time adding item
+      return [...prev, { product, quantity }];
     });
+
+    lastAddedItem.current = {
+      id: product.id,
+      name: product.name,
+      timestamp: now,
+      wasDefaultQty: !explicitQuantityProvided && quantity === 1,
+    };
   }
 
-  function normalizeNumbers(text: string): string {
+  // Strip Spoken Units & Normalizes Numbers
+  function cleanSpokenInput(text: string): string {
     const numberWords: Record<string, string> = {
       one: "1", two: "2", three: "3", four: "4", five: "5",
       six: "6", seven: "7", eight: "8", nine: "9", ten: "10",
@@ -167,98 +263,111 @@ export default function BillingApp() {
       aath: "8", nau: "9", das: "10", aadha: "0.5"
     };
 
-    return text
-      .toLowerCase()
+    let cleaned = text.toLowerCase();
+
+    // Remove filler units so "oreo 5 packets" -> "oreo 5"
+    cleaned = cleaned.replace(/\b(packets?|pkts?|pieces?|pcs?|kg|kilo|grams?|gm|liters?|ltr|boxes?)\b/gi, "").trim();
+
+    return cleaned
       .split(/\s+/)
       .map(word => numberWords[word] || word)
       .join(" ");
   }
 
   function toRoman(str: string): string {
-  const devanagariMap: Record<string, string> = {
-    // Independent Vowels
-    "अ": "a", "आ": "aa", "इ": "i", "ई": "ee", "उ": "u", "ऊ": "oo",
-    "ए": "e", "ऐ": "ai", "ओ": "o", "औ": "au", "ऋ": "ri",
+    const devanagariMap: Record<string, string> = {
+      "अ": "a", "आ": "aa", "इ": "i", "ई": "ee", "उ": "u", "ऊ": "oo",
+      "ए": "e", "ऐ": "ai", "ओ": "o", "औ": "au", "ऋ": "ri",
+      "\u093E": "a", "\u093F": "i", "\u0940": "i", "\u0941": "u", "\u0942": "u",
+      "\u0947": "e", "\u0948": "ai", "\u094B": "o", "\u094C": "au",
+      "\u0901": "n", "\u0902": "n", "\u0903": "h", "\u094D": "", "\u093C": "",
+      "क": "k", "ख": "kh", "ग": "g", "घ": "gh", "ङ": "ng",
+      "च": "ch", "छ": "chh", "ज": "j", "झ": "jh", "ञ": "nya",
+      "ट": "t", "ठ": "th", "ड": "d", "ढ": "dh", "ण": "n",
+      "त": "t", "थ": "th", "द": "d", "ध": "dh", "न": "n",
+      "प": "p", "फ": "f", "ब": "b", "भ": "bh", "म": "m",
+      "य": "y", "र": "r", "ल": "l", "व": "v",
+      "श": "sh", "ष": "sh", "स": "s", "ह": "h",
+      "०": "0", "१": "1", "२": "2", "३": "3", "४": "4",
+      "५": "5", "६": "6", "७": "7", "८": "8", "९": "9"
+    };
 
-    // Vowel Signs / Matras (Escaped Unicode keys bypass SWC lexer errors)
-    "\u093E": "a",  // Aa matra  (ा)
-    "\u093F": "i",  // Short I   (ि)
-    "\u0940": "i",  // Long I    (ी)
-    "\u0941": "u",  // Short U   (ु)
-    "\u0942": "u",  // Long U    (ू)
-    "\u0947": "e",  // E matra   (े)
-    "\u0948": "ai", // Ai matra  (ै)
-    "\u094B": "o",  // O matra   (ो)
-    "\u094C": "au", // Au matra  (ौ)
+    return str
+      .split("")
+      .map(c => devanagariMap[c] || c)
+      .join("");
+  }
 
-    // Modifiers & Diacritics
-    "\u0901": "n",  // Chandrabindu (ँ)
-    "\u0902": "n",  // Anusvara     (ं)
-    "\u0903": "h",  // Visarga      (ः)
-    "\u094D": "",   // Halant       (्)
-    "\u093C": "",   // Nukta        (़)
-
-    // Consonants
-    "क": "k", "ख": "kh", "ग": "g", "घ": "gh", "ङ": "ng",
-    "च": "ch", "छ": "chh", "ज": "j", "झ": "jh", "ञ": "nya",
-    "ट": "t", "ठ": "th", "ड": "d", "ढ": "dh", "ण": "n",
-    "त": "t", "थ": "th", "द": "d", "ध": "dh", "न": "n",
-    "प": "p", "फ": "f", "ब": "b", "भ": "bh", "म": "m",
-    "य": "y", "र": "r", "ल": "l", "व": "v",
-    "श": "sh", "ष": "sh", "स": "s", "ह": "h",
-
-    // Digits
-    "०": "0", "१": "1", "२": "2", "३": "3", "४": "4",
-    "५": "5", "६": "6", "७": "7", "८": "8", "९": "9"
-  };
-
-  return str
-    .split("")
-    .map(c => devanagariMap[c] || c)
-    .join("");
-}
-
-
-  // Pure function for stream parsing to avoid React hook dependency issues
+  // Conversational Multi-Item & Voice Command Engine
   function processVoiceStream(rawTranscript: string) {
-    if (!rawTranscript || rawTranscript === lastProcessedTranscript.current) return;
+    if (!rawTranscript || rawTranscript === lastProcessedTranscript.current || isSpeakingAssistant.current) return;
     lastProcessedTranscript.current = rawTranscript;
 
     const clean = rawTranscript.toLowerCase().trim();
 
-    // Command 1: Finalize Bill
+    // Voice Action 1: Finalize Bill
     if (/finalize\s*bill|final\s*bill|finish\s*bill|complete\s*bill/i.test(clean)) {
       if (recognition.current) recognition.current.stop();
       setListening(false);
+      playSoundCue("action");
       speakAssistant("Should I finalize the bill now?");
       setShowFinalizeModal(true);
       setMessage("Voice assistant paused. Review and confirm to finalize bill.");
       return;
     }
 
-    // Command 2: Clear Bill
+    // Voice Action 2: Undo Last Item
+    if (/undo|cancel\s*that|remove\s*last|take\s*back/i.test(clean)) {
+      if (lastAddedItem.current) {
+        const itemToRemove = lastAddedItem.current;
+        setCart(prev => prev.filter(i => i.product.id !== itemToRemove.id));
+        playSoundCue("action");
+        speakAssistant(`Undid ${itemToRemove.name}`);
+        setMessage(`Undid last added item: ${itemToRemove.name}`);
+        lastAddedItem.current = null;
+      }
+      return;
+    }
+
+    // Voice Action 3: Clear Bill
     if (/clear\s*bill|clear\s*all|reset\s*bill|empty\s*cart/i.test(clean)) {
       setCart([]);
       setDiscount("0");
+      playSoundCue("action");
       speakAssistant("Bill cleared.");
       setMessage("Bill cleared via voice command.");
       return;
     }
 
-    // Command 3: Remove Product
+    // Voice Action 4: Change Quantity ("Change to 3" or "Make it 2")
+    const changeQtyMatch = clean.match(/(?:change|make|set)(?:\s+it|\s+qty|\s+quantity)?\s+(?:to\s+)?(\d+)/i);
+    if (changeQtyMatch && changeQtyMatch[1] && lastAddedItem.current) {
+      const newQty = parseInt(changeQtyMatch[1], 10);
+      if (newQty > 0) {
+        const targetId = lastAddedItem.current.id;
+        setCart(prev => prev.map(i => (i.product.id === targetId ? { ...i, quantity: newQty } : i)));
+        playSoundCue("success");
+        speakAssistant(`Updated quantity to ${newQty}`);
+        setMessage(`Updated ${lastAddedItem.current.name} quantity to ${newQty}`);
+      }
+      return;
+    }
+
+    // Voice Action 5: Remove Specific Item ("Remove Kitkat")
     const removeMatch = clean.match(/(?:remove|delete|drop)\s+([a-z0-9\s]+)/i);
     if (removeMatch && removeMatch[1]) {
       const targetName = removeMatch[1].trim();
       const productToRemove = findProduct(targetName);
       if (productToRemove) {
         setCart(prev => prev.filter(item => item.product.id !== productToRemove.id));
-        speakAssistant(`Removed ${productToRemove.name} from bill.`);
+        playSoundCue("action");
+        speakAssistant(`Removed ${productToRemove.name}`);
         setMessage(`Removed ${productToRemove.name} from bill.`);
       }
       return;
     }
 
-    // Multi-Item Phrase Parser
+    // Multi-Item Extraction Logic ("Dairy Milk 5 KitKat 6 Bourbon 2")
     let itemText = clean.replace(/ok\s*add\s*product|add\s*products?|add\s*items?/gi, "").trim();
     const pairRegex = /([a-z\s\-]+?)\s+(\d+(?:\.\d+)?)(?=\s+[a-z]|$)/gi;
     let match: RegExpExecArray | null;
@@ -271,37 +380,88 @@ export default function BillingApp() {
       if (rawName && qty > 0) {
         const product = findProduct(rawName);
         if (product) {
-          addToCart(product, qty);
+          smartAddToCart(product, qty, true);
           itemsAdded.push(`${qty} × ${product.name}`);
         }
       }
     }
 
     if (itemsAdded.length > 0) {
-      const feedbackMsg = `Added ${itemsAdded.join(", ")} to the bill.`;
+      playSoundCue("success");
+      const feedbackMsg = `Added ${itemsAdded.join(", ")}`;
       setMessage(feedbackMsg);
       speakAssistant(feedbackMsg);
     } else {
+      // Single Item Fallback ("Oreo")
       const { name, quantity } = parseQuantity(clean);
       if (name) {
         const product = findProduct(name);
         if (product) {
-          addToCart(product, quantity);
-          setMessage(`Added ${quantity} × ${product.name} to this bill.`);
+          smartAddToCart(product, quantity, false);
+          playSoundCue("success");
+          setMessage(`Added ${quantity} × ${product.name}`);
+        } else {
+          playSoundCue("error");
+          setMessage(`Could not find "${name}". Add it to catalogue or say exact name.`);
         }
       }
     }
   }
 
+  // Live Sound Visualizer Setup
+  async function startAudioVisualizer() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStreamRef.current = stream;
+
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      const audioCtx = new AudioCtx();
+      audioContextRef.current = audioCtx;
+
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 64;
+      source.connect(analyser);
+
+      const bufferLength = analyser.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+
+      const updateLevel = () => {
+        analyser.getByteFrequencyData(dataArray);
+        let sum = 0;
+        for (let i = 0; i < bufferLength; i++) {
+          sum += dataArray[i];
+        }
+        const average = sum / bufferLength;
+        setAudioLevel(Math.min(100, Math.round((average / 128) * 100)));
+        animFrameRef.current = requestAnimationFrame(updateLevel);
+      };
+
+      updateLevel();
+    } catch {
+      // Ignore if user denies mic permission for canvas
+    }
+  }
+
+  function stopAudioVisualizer() {
+    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    if (micStreamRef.current) micStreamRef.current.getTracks().forEach(track => track.stop());
+    if (audioContextRef.current) audioContextRef.current.close();
+    setAudioLevel(0);
+  }
+
   function startVoice() {
     const Ctor = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
     if (!Ctor) {
-      setMessage("Voice input is not supported by this browser. Try Chrome on Android, or use product search.");
+      setMessage("Voice input is not supported by this browser. Try Chrome on Android.");
       return;
     }
+
     if (listening) {
       if (recognition.current) recognition.current.stop();
+      stopAudioVisualizer();
       setListening(false);
+      playSoundCue("action");
       speakAssistant("Microphone stopped.");
       return;
     }
@@ -312,6 +472,8 @@ export default function BillingApp() {
     rec.interimResults = true;
 
     rec.onresult = (event: any) => {
+      if (isSpeakingAssistant.current) return; // Mute recognition while assistant speaks
+
       let finalText = "", interim = "";
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const phrase = event.results[i][0].transcript;
@@ -326,25 +488,41 @@ export default function BillingApp() {
       setVoiceText(currentSpeech);
 
       if (processedFinal) {
-        const normalized = normalizeNumbers(processedFinal);
-        processVoiceStream(normalized);
+        const cleanedText = cleanSpokenInput(processedFinal);
+        processVoiceStream(cleanedText);
       }
     };
 
     rec.onerror = (e: any) => {
       setMessage(`Voice input issue: ${e.error || "please try again"}.`);
       setListening(false);
+      stopAudioVisualizer();
     };
 
-    rec.onend = () => setListening(false);
+    rec.onend = () => {
+      // Auto-Keep-Alive Restart
+      if (listening && !isSpeakingAssistant.current) {
+        try {
+          rec.start();
+        } catch {
+          setListening(false);
+          stopAudioVisualizer();
+        }
+      } else {
+        setListening(false);
+        stopAudioVisualizer();
+      }
+    };
 
     recognition.current = rec;
 
     try {
       rec.start();
+      startAudioVisualizer();
       setListening(true);
-      speakAssistant("Voice assistant active. Say ok add product then name items.");
-      setMessage("Listening… say “ok add product Dairy Milk 5 KitKat 6” or say “Finalize bill”.");
+      playSoundCue("action");
+      speakAssistant("Voice assistant active.");
+      setMessage("Listening continuously... Say 'Dairy Milk 5', 'Undo', or 'Finalize bill'.");
     } catch {
       setMessage("Could not start microphone. Check browser permissions.");
     }
@@ -400,6 +578,7 @@ export default function BillingApp() {
     setCart([]);
     setDiscount("0");
     setShowFinalizeModal(false);
+    playSoundCue("success");
     speakAssistant("Bill finalized and saved successfully.");
     setMessage(cloud ? "Bill saved to the cloud." : "Bill saved on this device only.");
     setBusy(false);
@@ -517,7 +696,7 @@ export default function BillingApp() {
         <div>
           <div className="eyebrow">YOUR COUNTER, SIMPLIFIED</div>
           <h1>Billing made<br />easy to say.</h1>
-          <p>Speak products continuously. List items back to back, then say "Finalize bill".</p>
+          <p>Speak products continuously. Say "Oreo 5", "Undo", or "Finalize bill".</p>
         </div>
         <button className="btn" onClick={() => setShowAdd(true)}>＋ Add product</button>
       </section>
@@ -536,22 +715,36 @@ export default function BillingApp() {
           </div>
 
           <div className="voice-box">
-            <div className="voice-row">
+            <div className="voice-row" style={{ display: "flex", alignItems: "center", gap: "12px" }}>
               <button
                 aria-label={listening ? "Stop voice billing" : "Start voice billing"}
                 className={`mic ${listening ? "listening" : ""}`}
                 onClick={startVoice}
+                style={{ position: "relative" }}
               >
                 {listening ? "■" : "🎙"}
               </button>
-              <div className="voice-copy">
-                <strong>{listening ? "Listening continuously…" : "Tap to start voice assistant"}</strong>
-                <small>Try: “ok add product Dairy Milk 5 KitKat 6” or “Finalize bill”</small>
+
+              <div className="voice-copy" style={{ flex: 1 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <strong>{listening ? "Listening..." : "Tap to start voice assistant"}</strong>
+                  {/* Live Mic Sound Waveform Visualizer */}
+                  {listening && (
+                    <div style={{ display: "flex", alignItems: "flex-end", gap: "2px", height: "14px" }}>
+                      <span style={{ width: "3px", height: `${Math.max(20, audioLevel * 0.8)}%`, background: "#e11d48", borderRadius: "2px", transition: "height 0.1s" }} />
+                      <span style={{ width: "3px", height: `${Math.max(30, audioLevel * 1.2)}%`, background: "#e11d48", borderRadius: "2px", transition: "height 0.1s" }} />
+                      <span style={{ width: "3px", height: `${Math.max(15, audioLevel * 0.6)}%`, background: "#e11d48", borderRadius: "2px", transition: "height 0.1s" }} />
+                      <span style={{ width: "3px", height: `${Math.max(25, audioLevel * 1.0)}%`, background: "#e11d48", borderRadius: "2px", transition: "height 0.1s" }} />
+                    </div>
+                  )}
+                </div>
+                <small>Try: “Oreo 5”, “2 Milk”, “Undo”, or “Finalize bill”</small>
               </div>
             </div>
+
             <div className="transcript">{voiceText || "Your recognized speech will appear here."}</div>
             <div className="small-note">
-              Voice recognition supports continuous multi-item streaming & voice actions (Remove, Clear, Finalize).
+              Hands-free continuous recognition with auto sound chimes & voice undo support.
             </div>
           </div>
 
@@ -574,7 +767,7 @@ export default function BillingApp() {
                   <strong>{p.name}</strong>
                   <small>{money(p.price)} each{p.aliases.length ? ` · ${p.aliases.join(", ")}` : ""}</small>
                 </div>
-                <button className="btn soft" onClick={() => addToCart(p)}>＋ Add</button>
+                <button className="btn soft" onClick={() => smartAddToCart(p, 1, false)}>＋ Add</button>
               </div>
             ))}
             {!filtered.length && <div className="empty">No products match your search. Add it to catalogue first.</div>}
