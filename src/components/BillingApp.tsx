@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 import { parseCSV } from "@/lib/csv";
 import { normalizeText, parseQuantity } from "@/lib/voice";
@@ -40,14 +40,18 @@ const makeId = () =>
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-// AI Assistant Speech Synthesis Output
+// Safe Speech Synthesis for Browser Environments
 function speakAssistant(text: string) {
   if (typeof window !== "undefined" && "speechSynthesis" in window) {
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = "en-IN";
-    utterance.rate = 1.0;
-    window.speechSynthesis.speak(utterance);
+    try {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = "en-IN";
+      utterance.rate = 1.0;
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      // Ignore if speech synthesis is disabled on client browser
+    }
   }
 }
 
@@ -68,7 +72,7 @@ export default function BillingApp() {
   const [showFinalizeModal, setShowFinalizeModal] = useState(false);
   const [importing, setImporting] = useState(false);
   const [busy, setBusy] = useState(false);
-  
+
   const recognition = useRef<SpeechRecognitionLike | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const lastProcessedTranscript = useRef<string>("");
@@ -154,7 +158,6 @@ export default function BillingApp() {
     });
   }
 
-  // Normalizes spoken English & Hinglish number words into digits
   function normalizeNumbers(text: string): string {
     const numberWords: Record<string, string> = {
       one: "1", two: "2", three: "3", four: "4", five: "5",
@@ -171,7 +174,6 @@ export default function BillingApp() {
       .join(" ");
   }
 
-  // Converts Devanagari script characters into Roman letters
   function toRoman(str: string): string {
     const devanagariMap: Record<string, string> = {
       अ: "a", आ: "aa", इ: "i", ई: "ee", उ: "u", ऊ: "oo", ए: "e", ऐ: "ai", ओ: "o", औ: "au",
@@ -184,16 +186,16 @@ export default function BillingApp() {
     return str.split("").map(c => devanagariMap[c] || c).join("");
   }
 
-  // Multi-Item & AI Voice Command Processor
-  const processVoiceStream = useCallback((rawTranscript: string) => {
+  // Pure function for stream parsing to avoid React hook dependency issues
+  function processVoiceStream(rawTranscript: string) {
     if (!rawTranscript || rawTranscript === lastProcessedTranscript.current) return;
     lastProcessedTranscript.current = rawTranscript;
 
     const clean = rawTranscript.toLowerCase().trim();
 
-    // Command 1: Finalize Bill Trigger
+    // Command 1: Finalize Bill
     if (/finalize\s*bill|final\s*bill|finish\s*bill|complete\s*bill/i.test(clean)) {
-      recognition.current?.stop();
+      if (recognition.current) recognition.current.stop();
       setListening(false);
       speakAssistant("Should I finalize the bill now?");
       setShowFinalizeModal(true);
@@ -201,7 +203,7 @@ export default function BillingApp() {
       return;
     }
 
-    // Command 2: Clear Bill Trigger
+    // Command 2: Clear Bill
     if (/clear\s*bill|clear\s*all|reset\s*bill|empty\s*cart/i.test(clean)) {
       setCart([]);
       setDiscount("0");
@@ -210,7 +212,7 @@ export default function BillingApp() {
       return;
     }
 
-    // Command 3: Remove Specific Product
+    // Command 3: Remove Product
     const removeMatch = clean.match(/(?:remove|delete|drop)\s+([a-z0-9\s]+)/i);
     if (removeMatch && removeMatch[1]) {
       const targetName = removeMatch[1].trim();
@@ -223,10 +225,8 @@ export default function BillingApp() {
       return;
     }
 
-    // Multi-Item Extraction Logic: Parses phrases like "Dairy Milk 5 KitKat 6 Bourbon 2"
+    // Multi-Item Phrase Parser
     let itemText = clean.replace(/ok\s*add\s*product|add\s*products?|add\s*items?/gi, "").trim();
-
-    // Matches product names followed by numbers
     const pairRegex = /([a-z\s\-]+?)\s+(\d+(?:\.\d+)?)(?=\s+[a-z]|$)/gi;
     let match: RegExpExecArray | null;
     const itemsAdded: string[] = [];
@@ -249,7 +249,6 @@ export default function BillingApp() {
       setMessage(feedbackMsg);
       speakAssistant(feedbackMsg);
     } else {
-      // Fallback single item execution
       const { name, quantity } = parseQuantity(clean);
       if (name) {
         const product = findProduct(name);
@@ -259,16 +258,16 @@ export default function BillingApp() {
         }
       }
     }
-  }, [products]);
+  }
 
   function startVoice() {
-    const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const Ctor = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
     if (!Ctor) {
       setMessage("Voice input is not supported by this browser. Try Chrome on Android, or use product search.");
       return;
     }
     if (listening) {
-      recognition.current?.stop();
+      if (recognition.current) recognition.current.stop();
       setListening(false);
       speakAssistant("Microphone stopped.");
       return;
@@ -674,7 +673,6 @@ export default function BillingApp() {
 
       <footer className="footer">Kirana.Bill · Built for a simpler shop counter</footer>
 
-      {/* Modal: Manual Add Product */}
       {showAdd && (
         <div className="modal-backdrop" role="presentation" onClick={e => { if (e.target === e.currentTarget) setShowAdd(false); }}>
           <div className="modal" role="dialog" aria-modal="true" aria-labelledby="add-title">
@@ -696,7 +694,6 @@ export default function BillingApp() {
         </div>
       )}
 
-      {/* Modal: Voice / Button Finalize Confirmation */}
       {showFinalizeModal && (
         <div className="modal-backdrop" role="presentation" onClick={e => { if (e.target === e.currentTarget) setShowFinalizeModal(false); }}>
           <div className="modal" role="dialog" aria-modal="true" aria-labelledby="finalize-title">
@@ -715,4 +712,4 @@ export default function BillingApp() {
       )}
     </main>
   );
-      }
+}
